@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # <sure - utility belt for automated testing in python>
-# Copyright (C) <2010-2012>  Gabriel Falcão <gabriel@nacaolivre.org>
+# Copyright (C) <2010-2013>  Gabriel Falcão <gabriel@nacaolivre.org>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -15,10 +15,13 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+from __future__ import unicode_literals
+
 import re
 import os
 import sys
 
+import inspect
 import traceback
 
 from functools import wraps
@@ -36,15 +39,23 @@ from sure.core import safe_repr
 
 from sure.magic import is_cpython, patchable_builtin
 from sure.registry import context as _registry
+from sure.six import string_types, text_type, PY3, get_function_code
+from sure.six.moves import reduce
 
 
-version = '1.1.4'
+if PY3:
+    basestring = str
+
+version = '1.2.2'
 
 
 not_here_error = \
-    'you have tried to access the attribute "%s" from the context ' \
+    'you have tried to access the attribute %r from the context ' \
     '(aka VariablesBag), but there is no such attribute assigned to it. ' \
-    'Maybe you misspelled it ? Well, here are the options: [%s]'
+    'Maybe you misspelled it ? Well, here are the options: %s'
+
+
+original_obj_attrs = dir(object)
 
 
 class VariablesBag(dict):
@@ -73,7 +84,7 @@ class VariablesBag(dict):
             if attr not in dir(VariablesBag):
                 raise AssertionError(not_here_error % (
                     attr,
-                    ", ".join(map(safe_repr, self.__varnames__)),
+                    safe_repr(self.__varnames__),
                 ))
 
 
@@ -87,21 +98,22 @@ class CallBack(object):
         self.args = args or []
         self.kwargs = kwargs or {}
         self.callback_name = cb.__name__
-        self.callback_filename = os.path.split(cb.func_code.co_filename)[-1]
-        self.callback_lineno = cb.func_code.co_firstlineno + 1
+        self.callback_filename = os.path.split(get_function_code(cb).co_filename)[-1]
+        self.callback_lineno = get_function_code(cb).co_firstlineno + 1
 
     def apply(self, *optional_args):
         args = list(optional_args)
         args.extend(self.args)
         try:
             return self.callback(*args, **self.kwargs)
-        except:
+        except Exception:
             exc_klass, exc_value, tb = sys.exc_info()
-            err = traceback.format_exc(tb).splitlines()[-1]
+            err = traceback.format_exc().splitlines()[-1]
             err = err.replace('{0}:'.format(exc_klass.__name__), '').strip()
 
             if err.startswith(self.callback_name) and \
-               'takes no arguments (1 given)' in err:
+               ('takes no arguments (1 given)' in err or
+                'takes 0 positional arguments but 1 was given' in err):
                 raise TypeError(self.context_error % (
                     self.callback_name,
                     self.callback_filename,
@@ -146,10 +158,11 @@ def that_with_context(setup=None, teardown=None):
 
 scenario = that_with_context
 
+
 def within(**units):
     assert len(units) == 1, 'use within(number=unit). e.g.: within(one=second)'
 
-    word, unit = units.items()[0]
+    word, unit = list(units.items())[0]
     value = word_to_number(word)
 
     convert_from, convert_to = UNITS[unit]
@@ -162,25 +175,29 @@ def within(**units):
 
             try:
                 func(start, *args, **kw)
-            except TypeError, e:
-                fmt = u'%s() takes no arguments'
-                err = unicode(e)
-                if (fmt % func.__name__) in err:
+            except TypeError as e:
+                if PY3:
+                    # PY3 has different error message
+                    fmt = u'{0}() takes 0 positional arguments but 1 was given'
+                else:
+                    fmt = u'{0}() takes no arguments'
+                err = text_type(e)
+                if fmt.format(func.__name__) in err:
                     func(*args, **kw)
                 else:
-                    exc.append(e)
+                    exc.append(traceback.format_exc())
 
-            except Exception, e:
-                exc.append(e)
+            except Exception as e:
+                exc.append(traceback.format_exc())
 
             end = datetime.utcnow()
             delta = (end - start)
             took = convert_to(delta.microseconds)
-            print took, timeout
+            print(took, timeout)
             assert took < timeout, \
                    '%s did not run within %s %s' % (func.__name__, word, unit)
             if exc:
-                raise AssertionError(traceback.format_exc(exc.pop(0)))
+                raise AssertionError(exc.pop(0))
 
         wrap.__name__ = func.__name__
         wrap.__doc__ = func.__doc__
@@ -245,7 +262,7 @@ def action_for(context, provides=None, depends_on=None):
         depends_on = []
 
     def register_providers(func, attr):
-        if re.search(ur'^[{]\d+[}]$', attr):
+        if re.search(r'^[{]\d+[}]$', attr):
             return  # ignore dinamically declared provides
 
         if not attr in context.__sure_providers_of__:
@@ -254,7 +271,7 @@ def action_for(context, provides=None, depends_on=None):
         context.__sure_providers_of__[attr].append(func)
 
     def register_dinamic_providers(func, attr, args, kwargs):
-        found = re.search(ur'^[{](\d+)[}]$', attr)
+        found = re.search(r'^[{](\d+)[}]$', attr)
         if not found:
             return  # ignore dinamically declared provides
 
@@ -272,7 +289,7 @@ def action_for(context, provides=None, depends_on=None):
         context.__sure_providers_of__[attr].append(func)
 
     def ensure_providers(func, attr, args, kwargs):
-        found = re.search(ur'^[{](\d+)[}]$', attr)
+        found = re.search(r'^[{](\d+)[}]$', attr)
         if found:
             index = int(found.group(1))
             attr = args[index]
@@ -361,8 +378,10 @@ def assertionmethod(func):
             ", ".join(map(safe_repr, args)),
             ", ".join(["{0}={1}".format(k, safe_repr(kw[k])) for k in kw]),
         )
+        if not PY3:
+            msg = text_type(msg)
 
-        assert value, unicode(msg)
+        assert value, msg
         return value
 
     return wrapper
@@ -392,11 +411,13 @@ NEGATIVES = [
 
 
 class AssertionBuilder(object):
-    def __init__(self, name=None, negative=False):
+    def __init__(self, name=None, negative=False, obj=None):
         self._name = name
         self.negative = negative
+        self.obj = obj
         self._callable_args = []
         self._callable_kw = {}
+        self._that = AssertionHelper(self.obj)
 
     def __call__(self, obj):
         self.obj = obj
@@ -411,18 +432,10 @@ class AssertionBuilder(object):
         special_case = False
         special_case = attr in (POSITIVES + NEGATIVES)
 
-        self.negative = attr in NEGATIVES
-
-        if attr in POSITIVES:
-            self.negative = False
-            special_case = True
-
-        if attr in NEGATIVES:
-            self.negative = True
-            special_case = True
+        negative = attr in NEGATIVES
 
         if special_case:
-            return self
+            return AssertionBuilder(attr, negative=negative, obj=self.obj)
 
         return super(AssertionBuilder, self).__getattribute__(attr)
 
@@ -451,15 +464,15 @@ class AssertionBuilder(object):
 
     @assertionproperty
     def not_be(self):
-        return self.obj.should_not
+        return self.should_not
 
     @assertionproperty
     def not_have(self):
-        return self.obj.should_not
+        return self.should_not
 
     @assertionproperty
     def to_not(self):
-        return self.obj.should_not
+        return self.should_not
 
     @assertionproperty
     def to(self):
@@ -486,7 +499,7 @@ class AssertionBuilder(object):
             return True
 
         assert has_it, (
-            "%r should have the property `%s` but doesn't" % (
+            "%r should have the property `%s` but does not" % (
                 self.obj, name))
         return expect(getattr(self.obj, name))
 
@@ -499,7 +512,7 @@ class AssertionBuilder(object):
             return True
 
         assert has_it, (
-            "%r should have the key `%s` but doesn't" % (
+            "%r should have the key `%s` but does not" % (
                 self.obj, name))
         return expect(self.obj[name])
 
@@ -547,10 +560,10 @@ class AssertionBuilder(object):
     def none(self):
         if self.negative:
             assert self.obj is not None, (
-                ur"expected `{0}` to not be None".format(self.obj))
+                r"expected `{0}` to not be None".format(self.obj))
         else:
             assert self.obj is None, (
-                ur"expected `{0}` to be None".format(self.obj))
+                r"expected `{0}` to be None".format(self.obj))
 
         return True
 
@@ -560,7 +573,7 @@ class AssertionBuilder(object):
             collection_should = AssertionHelper(first)
         else:
             args = [first] + list(rest)
-            collection_should = AssertionHelper(range(*args))
+            collection_should = AssertionHelper(list(range(*args)))
 
         if self.negative:
             return collection_should.does_not_contain(self.obj)
@@ -583,8 +596,8 @@ class AssertionBuilder(object):
             if error:
                 return True
 
-            msg = '%r should differ to %r, but is the same thing'
-            raise AssertionError(msg % (self.obj, what))
+            msg = '%s should differ to %s, but is the same thing'
+            raise AssertionError(msg % (safe_repr(self.obj), safe_repr(what)))
 
         else:
             if not error:
@@ -593,19 +606,20 @@ class AssertionBuilder(object):
 
     eql = equal
     equals = equal
+    equal_to = equal
 
     @assertionmethod
     def an(self, klass):
         if isinstance(klass, type):
             class_name = klass.__name__
-        elif isinstance(klass, basestring):
+        elif isinstance(klass, string_types):
             class_name = klass.strip()
         else:
-            class_name = unicode(klass)
+            class_name = text_type(klass)
 
         is_vowel = class_name[0] in 'aeiou'
 
-        if isinstance(klass, basestring):
+        if isinstance(klass, string_types):
             if '.' in klass:
                 items = klass.split('.')
                 first = items.pop(0)
@@ -746,7 +760,7 @@ class AssertionBuilder(object):
             try:
                 self.obj(*self._callable_args, **self._callable_kw)
                 return True
-            except Exception, e:
+            except Exception as e:
                 err = msg.format(
                     self.obj,
                     self._that._callable_args,
@@ -778,9 +792,43 @@ class AssertionBuilder(object):
 
     @assertionmethod
     def contain(self, what):
-        import ipdb;ipdb.set_trace()
+        if self.negative:
+            return expect(what).to.not_be.within(self.obj)
+        else:
+            return expect(what).to.be.within(self.obj)
+
+    @assertionmethod
+    def match(self, regex, *args):
+        obj_repr = repr(self.obj)
+        assert isinstance(self.obj, basestring), (
+            "{0} should be a string in order to compare using .match()".format(obj_repr)
+        )
+        matched = re.search(regex, self.obj, *args)
+
+        modifiers_map = {
+            re.I: "i",
+            re.L: "l",
+            re.M: "m",
+            re.S: "s",
+            re.U: "u",
+        }
+        modifiers = "".join([modifiers_map.get(x, "") for x in args])
+        regex_representation = '/{0}/{1}'.format(regex, modifiers)
+
+        if self.negative:
+            assert matched is None, (
+                "{0} should not match the regular expression {1}".format(
+                    obj_repr, regex_representation))
+
+        else:
+            assert matched is not None, (
+                "{0} doesn't match the regular expression {1}".format(
+                    obj_repr, regex_representation))
+
+        return True
 
 this = AssertionBuilder('this')
+the = AssertionBuilder('the')
 it = AssertionBuilder('it')
 these = AssertionBuilder('these')
 those = AssertionBuilder('those')
@@ -788,6 +836,7 @@ expect = AssertionBuilder('expect')
 
 
 allows_new_syntax = not os.getenv('SURE_DISABLE_NEW_SYNTAX')
+
 
 if is_cpython and allows_new_syntax:
 
@@ -819,7 +868,7 @@ if is_cpython and allows_new_syntax:
                 instance._callable_kw = callable_kw
             return instance
 
-        method.__name__ = name
+        method.__name__ = str(name)
         return make_safe_property(method, name, prop)
 
     def negative_assertion(name, prop=True):
@@ -834,7 +883,7 @@ if is_cpython and allows_new_syntax:
                 instance._callable_kw = callable_kw
             return instance
 
-        method.__name__ = name
+        method.__name__ = str(name)
         return make_safe_property(method, name, prop)
 
     object_handler = patchable_builtin(object)
@@ -842,6 +891,7 @@ if is_cpython and allows_new_syntax:
     # None does not have a tp_dict associated to its PyObject, so this
     # is the only way we could make it work like we expected.
     none = patchable_builtin(None.__class__)
+
     for name in POSITIVES:
         object_handler[name] = positive_assertion(name)
         none[name] = positive_assertion(name, False)
@@ -849,3 +899,18 @@ if is_cpython and allows_new_syntax:
     for name in NEGATIVES:
         object_handler[name] = negative_assertion(name)
         none[name] = negative_assertion(name, False)
+
+
+old_dir = dir
+
+
+if allows_new_syntax:
+    @wraps(builtins.dir)
+    def _new_dir(obj=None):
+        if obj is None:
+            frame = inspect.currentframe()
+            return sorted(frame.f_back.f_locals.keys())
+        else:
+            return sorted(set(old_dir(obj)).difference(POSITIVES + NEGATIVES))
+
+    builtins.dir = _new_dir

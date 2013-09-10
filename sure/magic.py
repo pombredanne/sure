@@ -16,17 +16,18 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+from __future__ import unicode_literals
 
 import platform
 
 is_cpython = (
     hasattr(platform, 'python_implementation')
-    and platform.python_implementation())
+    and platform.python_implementation().lower() == 'cpython')
 
 if is_cpython:
 
     import ctypes
-    from types import DictProxyType
+    DictProxyType = type(object.__dict__)
 
     Py_ssize_t = \
         hasattr(ctypes.pythonapi, 'Py_InitModule4_64') \
